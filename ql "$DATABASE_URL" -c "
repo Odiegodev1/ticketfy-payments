@@ -1,0 +1,17 @@
+                  id                  |      order_id      | amount_cents | status  | pix_creation_status |            cajupay_payment_id             
+--------------------------------------+--------------------+--------------+---------+---------------------+-------------------------------------------
+ 66434267-bc57-460c-965e-3f740e496a2b | TICKETFY-TESTE-002 |         5000 | PENDING | CREATED             | mock_66434267-bc57-460c-965e-3f740e496a2b
+ f94be306-892e-4576-ba36-25a30bec0b54 | TICKETFY-TESTE-001 |         2500 | PENDING |                     | 
+(2 rows)
+
+                  id                  |               order_id               | amount_cents | status  | pix_creation_status |          updated_at           
+--------------------------------------+--------------------------------------+--------------+---------+---------------------+-------------------------------
+ 821faca8-6351-4e6a-9fc8-ce2c15f35e54 | 2a928fc7-85b3-420a-8711-a97499bd18e8 |        28000 | PENDING | CREATED             | 2026-11-17 17:08:41.426801+00
+ 510f66e8-41b1-40d9-8922-9259c5151ac6 | ticketfy-teste-001                   |         1500 | PENDING | CREATED             | 2026-11-17 16:42:43.919984+00
+ 9ffe51fd-0b5b-4161-9368-ee342e01df40 | 593961e1-f5dc-48be-ba4d-7f641b82e117 |        28000 | PENDING | CREATED             | 2026-11-10 17:16:29.34715+00
+ d8474d5c-bb0f-4f27-8b60-e7ac953e3b63 | f03429b6-3ab2-4477-aef3-e0e6f8955977 |        28000 | PENDING | CREATED             | 2026-11-10 17:14:39.474078+00
+ 57de2658-dd15-44e0-870d-efdff681c8ea | 4b2bb71f-5266-49a8-a343-2458708f9417 |        28000 | PENDING | CREATED             | 2026-11-10 16:05:19.175282+00
+ c07dd808-f0f4-4fb6-95ba-0ecc09d391ef | TICKETFY-TESTE-001                   |         2000 | PENDING | CREATED             | 2026-11-10 13:46:59.420511+00
+ 418cab36-58c4-4057-aaf5-32830af324c3 | ticketfy-teste-1794318025            |          200 | PENDING | CREATED             | 2026-11-10 13:41:09.872954+00
+(7 rows)
+

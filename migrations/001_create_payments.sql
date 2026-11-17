@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS payments (
+ id UUID PRIMARY KEY,
+ order_id VARCHAR(120) NOT NULL UNIQUE,
+ amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+ currency CHAR(3) NOT NULL DEFAULT 'BRL' CHECK (currency = 'BRL'),
+ status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','PAID','FAILED','EXPIRED','REFUNDED')),
+ provider VARCHAR(30) NOT NULL DEFAULT 'CAJUPAY',
+ provider_payment_id VARCHAR(150) UNIQUE,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);

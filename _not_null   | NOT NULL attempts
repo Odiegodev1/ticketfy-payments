@@ -1,0 +1,15 @@
+              conname               |                                               definition                                               
+------------------------------------+--------------------------------------------------------------------------------------------------------
+ payment_outbox_attempts_not_null   | NOT NULL attempts
+ payment_outbox_created_at_not_null | NOT NULL created_at
+ payment_outbox_event_type_not_null | NOT NULL event_type
+ payment_outbox_id_not_null         | NOT NULL id
+ payment_outbox_order_id_not_null   | NOT NULL order_id
+ payment_outbox_payment_id_key      | UNIQUE (payment_id)
+ payment_outbox_payment_id_not_null | NOT NULL payment_id
+ payment_outbox_pkey                | PRIMARY KEY (id)
+ payment_outbox_status_check        | CHECK ((status = ANY (ARRAY['PENDING'::text, 'PROCESSING'::text, 'DELIVERED'::text, 'FAILED'::text])))
+ payment_outbox_status_not_null     | NOT NULL status
+ payment_outbox_updated_at_not_null | NOT NULL updated_at
+(11 rows)
+

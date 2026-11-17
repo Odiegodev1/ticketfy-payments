@@ -1,0 +1,522 @@
+
+========== internal/payment/handler.go ==========
+package payment
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+)
+
+type Handler struct {
+	Repo Repository
+	Pix  PixService
+}
+
+func reply(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+func (h Handler) Create(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var input struct {
+		OrderID     string `json:"orderId"`
+		AmountCents int64  `json:"amountCents"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&input); err != nil {
+		reply(w, 400, map[string]string{"error": "JSON inválido"})
+		return
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		reply(w, 400, map[string]string{"error": "JSON deve conter apenas um objeto"})
+		return
+	}
+	input.OrderID = strings.TrimSpace(input.OrderID)
+	if len(input.OrderID) < 1 || len(input.OrderID) > 120 || input.AmountCents < 1 || input.AmountCents > 100000000 {
+		reply(w, 400, map[string]string{"error": "pedido ou valor inválido"})
+		return
+	}
+	p, created, err := h.Repo.Create(r.Context(), input.OrderID, input.AmountCents)
+	if err != nil {
+		reply(w, 500, map[string]string{"error": "falha interna"})
+		return
+	}
+	if p.AmountCents != input.AmountCents {
+		reply(w, 409, map[string]string{"error": "pedido já existe com outro valor"})
+		return
+	}
+	status := 200
+	if created {
+		status = 201
+	}
+	reply(w, status, p)
+}
+func (h Handler) Get(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(id); err != nil {
+		reply(w, 400, map[string]string{"error": "id inválido"})
+		return
+	}
+	p, err := h.Repo.ByID(r.Context(), id)
+	if errors.Is(err, ErrNotFound) {
+		reply(w, 404, map[string]string{"error": "não encontrado"})
+		return
+	}
+	if err != nil {
+		reply(w, 500, map[string]string{"error": "falha interna"})
+		return
+	}
+	reply(w, 200, p)
+}
+
+func (h *Handler) CreatePix(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	id := chi.URLParam(r, "id")
+
+	if _, err := uuid.Parse(id); err != nil {
+		reply(w, http.StatusBadRequest, map[string]string{
+			"error": "ID do pagamento inválido",
+		})
+		return
+	}
+
+	result, err := h.Pix.Create(r.Context(), id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			reply(w, http.StatusNotFound, map[string]string{
+				"error": "Pagamento não encontrado",
+			})
+
+		case errors.Is(err, ErrPixProcessing):
+			reply(w, http.StatusConflict, map[string]string{
+				"error": "Pix já solicitado ou em processamento",
+			})
+
+		default:
+			reply(w, http.StatusInternalServerError, map[string]string{
+				"error": "Não foi possível gerar o Pix",
+			})
+		}
+
+		return
+	}
+
+	reply(w, http.StatusCreated, map[string]any{
+		"paymentId":    result.PaymentID,
+		"pixCopyPaste": result.PixCopyPaste,
+		"pixQrCode":    result.PixQRCode,
+		"status":       result.Status,
+	})
+}
+
+========== internal/payment/model.go ==========
+package payment
+
+import "time"
+
+type Payment struct {
+	ID          string    `json:"id"`
+	OrderID     string    `json:"orderId"`
+	AmountCents int64     `json:"amountCents"`
+	Currency    string    `json:"currency"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+========== internal/payment/pix_service.go ==========
+package payment
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+var (
+	ErrPixProcessing = errors.New(
+		"criação do Pix já iniciada ou aguardando recuperação",
+	)
+
+	ErrPixAlreadyCreated = errors.New(
+		"Pix já criado",
+	)
+)
+
+type PixGateway interface {
+	CreatePix(
+		ctx context.Context,
+		input PixRequest,
+		idempotencyKey string,
+	) (PixResponse, error)
+}
+
+type PixRequest struct {
+	AmountCents int64
+	Currency    string
+	Description string
+	ProductRef  string
+}
+
+type PixResponse struct {
+	PaymentID    string
+	PixCopyPaste string
+	PixQRCode    string
+	Status       string
+}
+
+type PixService struct {
+	Repo    Repository
+	Gateway PixGateway
+}
+
+func (s PixService) Create(
+	ctx context.Context,
+	paymentID string,
+) (*PixResponse, error) {
+	if _, err := uuid.Parse(paymentID); err != nil {
+		return nil, errors.New("ID inválido")
+	}
+
+	payment, err := s.Repo.ByID(ctx, paymentID)
+	if err != nil {
+		return nil, err
+	}
+
+	if payment.Status != "PENDING" {
+		return nil, errors.New("pagamento não está pendente")
+	}
+
+	// Primeiro verifica se o Pix já foi criado.
+	existing, err := s.Repo.GetPix(ctx, paymentID)
+	if err != nil {
+		return nil, err
+	}
+
+	if existing.CreationStatus == "CREATED" {
+		if existing.ProviderID == "" {
+			return nil, errors.New(
+				"Pix criado sem identificador do provedor",
+			)
+		}
+
+		return &PixResponse{
+			PaymentID:    existing.ProviderID,
+			PixCopyPaste: existing.CopyPaste,
+			PixQRCode:    existing.QRCode,
+			Status:       "PENDING",
+		}, nil
+	}
+
+	// Se já estiver em criação, não inicia outra chamada.
+	if existing.CreationStatus == "CREATING" {
+		return nil, ErrPixProcessing
+	}
+
+	reserved, err := s.Repo.ReservePix(
+		ctx,
+		paymentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if !reserved {
+		return nil, ErrPixProcessing
+	}
+
+	// A chave permanece estável para este pagamento.
+	idempotencyKey := payment.ID
+
+	// Contexto independente da conexão HTTP original.
+	// Isso evita cancelar imediatamente a chamada ao
+	// provedor quando o comprador fecha a página.
+	providerCtx, cancel := context.WithTimeout(
+		context.Background(),
+		20*time.Second,
+	)
+	defer cancel()
+
+	result, err := s.Gateway.CreatePix(
+		providerCtx,
+		PixRequest{
+			AmountCents: payment.AmountCents,
+			Currency:    "BRL",
+			Description: fmt.Sprintf(
+				"Pedido Ticketfy %s",
+				payment.OrderID,
+			),
+			ProductRef: payment.OrderID,
+		},
+		idempotencyKey,
+	)
+
+	if err != nil {
+		// Não remove a reserva.
+		// O provedor pode ter criado a cobrança.
+		return nil, fmt.Errorf(
+			"falha ao criar Pix; reconciliação necessária: %w",
+			err,
+		)
+	}
+
+	if result.PaymentID == "" {
+		return nil, errors.New(
+			"CajuPay não retornou identificador; reconciliação necessária",
+		)
+	}
+
+	// Salva mesmo se o cliente HTTP original desconectou.
+	err = s.Repo.PersistPixAfterDisconnect(
+		paymentID,
+		result.PaymentID,
+		result.PixCopyPaste,
+		result.PixQRCode,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"Pix recebido, mas não persistido; reconciliação necessária: %w",
+			err,
+		)
+	}
+
+	return &result, nil
+}
+
+========== internal/payment/confirmation_service.go ==========
+package payment
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+var ErrPaymentNotPaid = errors.New(
+	"pagamento ainda não confirmado pela CajuPay",
+)
+
+type ConfirmationService struct {
+	Webhook WebhookService
+	Repo    Repository
+}
+
+type ConfirmationResult struct {
+	PaymentID      string `json:"paymentId"`
+	OrderID        string `json:"orderId"`
+	ProviderStatus string `json:"providerStatus"`
+	InternalStatus string `json:"internalStatus"`
+	Confirmed      bool   `json:"confirmed"`
+	AlreadyPaid    bool   `json:"alreadyPaid"`
+}
+
+func (s ConfirmationService) Confirm(
+	ctx context.Context,
+	paymentID string,
+) (*ConfirmationResult, error) {
+	// 1. Consultar a CajuPay e validar a cobrança.
+	verification, err := s.Webhook.Verify(ctx, paymentID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Exigir confirmação de pagamento.
+	if !strings.EqualFold(
+		verification.ProviderStatus,
+		"paid",
+	) {
+		return nil, ErrPaymentNotPaid
+	}
+
+	// 3. Conferir se já foi confirmado.
+	if verification.InternalStatus != "PENDING" &&
+		verification.InternalStatus != "PAID" {
+		return nil, fmt.Errorf(
+			"status interno não permite confirmação: %s",
+			verification.InternalStatus,
+		)
+	}
+
+	// 4. Atualizar NeonDB.
+	updated, err := s.Repo.ConfirmPaymentAndQueue(
+		ctx,
+		paymentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if !updated {
+		// Pode ter ocorrido uma confirmação concorrente.
+		current, err := s.Repo.ByID(ctx, paymentID)
+		if err != nil {
+			return nil, err
+		}
+
+		if current.Status != "PAID" {
+			return nil, errors.New(
+				"pagamento não pôde ser confirmado",
+			)
+		}
+	}
+
+	return &ConfirmationResult{
+		PaymentID:      paymentID,
+		OrderID:        verification.OrderID,
+		ProviderStatus: verification.ProviderStatus,
+		InternalStatus: "PAID",
+		Confirmed:      true,
+		AlreadyPaid:    !updated,
+	}, nil
+}
+
+========== internal/payment/confirmation_repository.go ==========
+package payment
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+)
+
+var ErrPaymentNotConfirmable = errors.New(
+	"pagamento não está disponível para confirmação",
+)
+
+func (r Repository) ConfirmPaymentAndQueue(
+	ctx context.Context,
+	paymentID string,
+) (bool, error) {
+
+	tx, err := r.DB.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf(
+			"iniciar transação: %w",
+			err,
+		)
+	}
+
+	defer tx.Rollback(ctx)
+
+	// Bloqueia o pagamento durante a transação.
+	var orderID string
+	var status string
+	var creationStatus string
+	var providerID string
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT
+			order_id,
+			status,
+			COALESCE(pix_creation_status, ''),
+			COALESCE(cajupay_payment_id, '')
+		FROM payments
+		WHERE id = $1
+		FOR UPDATE
+		`,
+		paymentID,
+	).Scan(
+		&orderID,
+		&status,
+		&creationStatus,
+		&providerID,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNotFound
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	if status != "PENDING" && status != "PAID" {
+		return false, ErrPaymentNotConfirmable
+	}
+
+	if creationStatus != "CREATED" ||
+		providerID == "" {
+		return false, ErrPaymentNotConfirmable
+	}
+
+	// Apenas uma transição PENDING -> PAID.
+	updated := false
+
+	if status == "PENDING" {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			UPDATE payments
+			SET
+				status = 'PAID',
+				updated_at = NOW()
+			WHERE
+				id = $1
+				AND status = 'PENDING'
+			`,
+			paymentID,
+		)
+
+		if err != nil {
+			return false, err
+		}
+
+		updated = tag.RowsAffected() == 1
+
+		if !updated {
+			return false, ErrPaymentNotConfirmable
+		}
+	}
+
+	// Registra uma única notificação por pagamento.
+	_, err = tx.Exec(
+		ctx,
+		`
+		INSERT INTO payment_outbox (
+			payment_id,
+			order_id,
+			event_type,
+			status
+		)
+		VALUES ($1, $2, 'PAYMENT_PAID', 'PENDING')
+		ON CONFLICT (payment_id) DO NOTHING
+		`,
+		paymentID,
+		orderID,
+	)
+
+	if err != nil {
+		return false, err
+	}
+
+	// As duas operações são confirmadas juntas.
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf(
+			"confirmar transação: %w",
+			err,
+		)
+	}
+
+	return updated, nil
+}

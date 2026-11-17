@@ -1,0 +1,18 @@
+# Variáveis de ambiente
+.env
+.env.*
+!.env.example
+
+# Binários
+ticketfy-payments
+*.exe
+*.out
+*.test
+
+# Arquivos locais
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
